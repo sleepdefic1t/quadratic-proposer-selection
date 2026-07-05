@@ -1,0 +1,119 @@
+{
+  "analysis_date": "2026-07-01",
+  "chain": "mono_6940-1",
+  "total_duration_days": 95,
+  "total_blocks": 1385896,
+  "stable_window_blocks": 579523,
+  "windows": [
+    {
+      "id": "W1",
+      "start": 378789,
+      "end": 421150,
+      "blocks": 42362,
+      "validators": 38,
+      "chi2_statistic": 0.89,
+      "chi2_p_value": 1.0,
+      "gini_observed": 0.124,
+      "gini_predicted": 0.1237,
+      "gini_linear": 0.2818,
+      "improvement_pct": 56.0
+    },
+    {
+      "id": "W2",
+      "start": 626176,
+      "end": 662643,
+      "blocks": 36468,
+      "validators": 28,
+      "chi2_statistic": 2.95,
+      "chi2_p_value": 1.0,
+      "gini_observed": 0.1083,
+      "gini_predicted": 0.1097,
+      "gini_linear": 0.2355,
+      "improvement_pct": 54.0
+    },
+    {
+      "id": "W3",
+      "start": 799095,
+      "end": 847473,
+      "blocks": 48379,
+      "validators": 17,
+      "chi2_statistic": 27.45,
+      "chi2_p_value": 0.0366,
+      "gini_observed": 0.1156,
+      "gini_predicted": 0.1141,
+      "gini_linear": 0.2506,
+      "improvement_pct": 53.9
+    },
+    {
+      "id": "W4",
+      "start": 887102,
+      "end": 947909,
+      "blocks": 60808,
+      "validators": 15,
+      "chi2_statistic": 5.97,
+      "chi2_p_value": 0.9668,
+      "gini_observed": 0.1209,
+      "gini_predicted": 0.1194,
+      "gini_linear": 0.2612,
+      "improvement_pct": 53.7
+    },
+    {
+      "id": "W5",
+      "start": 967322,
+      "end": 1043218,
+      "blocks": 75897,
+      "validators": 11,
+      "chi2_statistic": 1.2,
+      "chi2_p_value": 0.9994,
+      "gini_observed": 0.1319,
+      "gini_predicted": 0.1313,
+      "gini_linear": 0.2813,
+      "improvement_pct": 53.1
+    },
+    {
+      "id": "W6",
+      "start": 1070288,
+      "end": 1124745,
+      "blocks": 54458,
+      "validators": 8,
+      "chi2_statistic": 0.03,
+      "chi2_p_value": 1.0,
+      "gini_observed": 0.1303,
+      "gini_predicted": 0.1301,
+      "gini_linear": 0.2746,
+      "improvement_pct": 52.5
+    },
+    {
+      "id": "W7",
+      "start": 1124746,
+      "end": 1136201,
+      "blocks": 11456,
+      "validators": 7,
+      "chi2_statistic": 0.13,
+      "chi2_p_value": 0.9998,
+      "gini_observed": 0.1404,
+      "gini_predicted": 0.139,
+      "gini_linear": 0.2877,
+      "improvement_pct": 51.2
+    },
+    {
+      "id": "W8",
+      "start": 1136202,
+      "end": 1385896,
+      "blocks": 249695,
+      "validators": 6,
+      "chi2_statistic": 0.06,
+      "chi2_p_value": 0.9997,
+      "gini_observed": 0.13,
+      "gini_predicted": 0.13,
+      "gini_linear": 0.2696,
+      "improvement_pct": 51.8
+    }
+  ],
+  "aggregate": {
+    "gini_improvement_range": "51.2-56.0%",
+    "gini_improvement_mean": 53.3,
+    "chi2_p_value_range": "0.0366-1.0",
+    "validator_range": "6-38"
+  }
+}

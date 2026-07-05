@@ -1,0 +1,79 @@
+{
+  "timestamp": "2026-04-16T00:35:00Z",
+  "methodology": "Real validator set data from live chain APIs, exact Gini computation",
+  "results": [
+    {
+      "chain": "Monolythium",
+      "n_validators": 37,
+      "gini_linear": 0.2835,
+      "gini_sqrt": 0.1260,
+      "improvement_pct": 55.5
+    },
+    {
+      "chain": "Aptos",
+      "n_validators": 110,
+      "gini_linear": 0.4104,
+      "gini_sqrt": 0.2205,
+      "improvement_pct": 46.3
+    },
+    {
+      "chain": "Sui",
+      "n_validators": 127,
+      "gini_linear": 0.3817,
+      "gini_sqrt": 0.2060,
+      "improvement_pct": 46.0
+    },
+    {
+      "chain": "Injective",
+      "n_validators": 50,
+      "gini_linear": 0.4325,
+      "gini_sqrt": 0.2399,
+      "improvement_pct": 44.5
+    },
+    {
+      "chain": "Celestia",
+      "n_validators": 95,
+      "gini_linear": 0.5173,
+      "gini_sqrt": 0.3179,
+      "improvement_pct": 38.6
+    },
+    {
+      "chain": "Osmosis",
+      "n_validators": 91,
+      "gini_linear": 0.6034,
+      "gini_sqrt": 0.4000,
+      "improvement_pct": 33.7
+    },
+    {
+      "chain": "Cosmos Hub",
+      "n_validators": 200,
+      "gini_linear": 0.8195,
+      "gini_sqrt": 0.5583,
+      "improvement_pct": 31.9
+    },
+    {
+      "chain": "Axelar",
+      "n_validators": 53,
+      "gini_linear": 0.3348,
+      "gini_sqrt": 0.2342,
+      "improvement_pct": 30.0
+    },
+    {
+      "chain": "Polygon",
+      "n_validators": 104,
+      "gini_linear": 0.8186,
+      "gini_sqrt": 0.6043,
+      "improvement_pct": 26.2
+    }
+  ],
+  "summary": {
+    "chains_analyzed": 9,
+    "average_improvement_pct": 39.2,
+    "srsw_reported_average": 36.2
+  },
+  "excluded": {
+    "Celo": "Migrated to Ethereum L2 (2024), no independent validator set",
+    "BNB Chain": "Parlia consensus (21 fixed validators), API requires authentication"
+  },
+  "srsw_comparison_source": "SRSW Table III and Table IV (2023-2024 snapshot)"
+}

@@ -1,0 +1,53 @@
+{
+  "collected": "2026-07-01T12:27:10Z",
+  "chain": "mono_6940-1",
+  "window": {
+    "start": 1136202,
+    "end": 1385896,
+    "blocks": 249695
+  },
+  "validators": 6,
+  "total_voting_power": 1431218,
+  "vp_changes_in_window": [],
+  "chi_squared": {
+    "statistic": 0.0644,
+    "df": 5,
+    "p_value": 0.999688
+  },
+  "gini": {
+    "observed": 0.129973,
+    "predicted": 0.13005,
+    "linear": 0.269569
+  },
+  "improvement_pct": {
+    "observed": 51.8,
+    "predicted": 51.8
+  },
+  "nakamoto_33": {
+    "observed": 2,
+    "predicted": 2,
+    "linear": 1
+  },
+  "hhi": {
+    "observed": 0.17784,
+    "linear": 0.216994
+  },
+  "max_intra_window_gap_seconds": 12.261,
+  "max_gap_height": 1288999,
+  "validator_set": {
+    "9D16ECB27106822F27D40EB58A727ECEEC6C496B": 497070,
+    "EA97426FA5DE15435A6FA4C7E330D23B01628D92": 320781,
+    "791611788310CFB8C6BD3AD68C75A8DDA7CC27B6": 166347,
+    "F6478C6EE7F2BAFB8AB647F8FEEABBCE0F566F45": 160605,
+    "F998B1D6348C951769A921D9A7DD3F77773A8628": 146755,
+    "3FEC70EE8DF03301EA49C6ACE7B5D2E8DA61629E": 139660
+  },
+  "proposer_counts": {
+    "EA97426FA5DE15435A6FA4C7E330D23B01628D92": 49802,
+    "F6478C6EE7F2BAFB8AB647F8FEEABBCE0F566F45": 35283,
+    "3FEC70EE8DF03301EA49C6ACE7B5D2E8DA61629E": 32904,
+    "9D16ECB27106822F27D40EB58A727ECEEC6C496B": 62078,
+    "791611788310CFB8C6BD3AD68C75A8DDA7CC27B6": 35903,
+    "F998B1D6348C951769A921D9A7DD3F77773A8628": 33725
+  }
+}

@@ -1,0 +1,23 @@
+\BOOKMARK [1][-]{section.1}{Introduction}{}% 1
+\BOOKMARK [1][-]{section.2}{Background: Proposer Selection in CometBFT}{}% 2
+\BOOKMARK [1][-]{section.3}{Quadratic Proposer Selection}{}% 3
+\BOOKMARK [1][-]{section.4}{Safety, Liveness, and the Deployment Surface}{}% 4
+\BOOKMARK [1][-]{section.5}{Economic Analysis}{}% 5
+\BOOKMARK [2][-]{subsection.5.1}{Concentration Tax}{section.5}% 6
+\BOOKMARK [2][-]{subsection.5.2}{Sybil Gain}{section.5}% 7
+\BOOKMARK [2][-]{subsection.5.3}{Scope of Validity: the Effective Premium}{section.5}% 8
+\BOOKMARK [2][-]{subsection.5.4}{Slashing Interaction}{section.5}% 9
+\BOOKMARK [2][-]{subsection.5.5}{Equilibrium}{section.5}% 10
+\BOOKMARK [1][-]{section.6}{The s Design Space}{}% 11
+\BOOKMARK [1][-]{section.7}{Implementation}{}% 12
+\BOOKMARK [2][-]{subsection.7.1}{Deterministic Arithmetic}{section.7}% 13
+\BOOKMARK [2][-]{subsection.7.2}{Preserved Invariants}{section.7}% 14
+\BOOKMARK [2][-]{subsection.7.3}{Boundary}{section.7}% 15
+\BOOKMARK [1][-]{section.8}{Empirical Results}{}% 16
+\BOOKMARK [2][-]{subsection.8.1}{Deployment Record}{section.8}% 17
+\BOOKMARK [2][-]{subsection.8.2}{Methodology}{section.8}% 18
+\BOOKMARK [2][-]{subsection.8.3}{Longitudinal Validation}{section.8}% 19
+\BOOKMARK [2][-]{subsection.8.4}{Cross-Chain Analysis}{section.8}% 20
+\BOOKMARK [2][-]{subsection.8.5}{Threats to Validity}{section.8}% 21
+\BOOKMARK [1][-]{section.9}{Related Work}{}% 22
+\BOOKMARK [1][-]{section.10}{Conclusion}{}% 23

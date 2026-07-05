@@ -1,0 +1,23 @@
+cff-version: 1.2.0
+message: "If you use this work, please cite it as below."
+title: "Quadratic Proposer Selection"
+authors:
+  - given-names: Simon
+    family-names: Downey
+date-released: 2026-07-04
+license: MIT
+repository-code: https://github.com/sleepdefic1t/quadratic-proposer-selection
+keywords:
+  - BFT consensus
+  - proposer selection
+  - stake concentration
+  - CometBFT
+  - Tendermint
+preferred-citation:
+  type: report
+  title: "Quadratic Proposer Selection: Sublinear Block Production in BFT Consensus"
+  authors:
+    - given-names: Simon
+      family-names: Downey
+  year: 2026
+  month: 7

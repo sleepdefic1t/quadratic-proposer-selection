@@ -1,0 +1,502 @@
+36592a9408867cd8750f95e6277877e43c7617b8
+feat(consensus): quadratic proposer selection (#1)
+
+Implement quadratic proposer selection using sqrt(votingPower) normalized to totalVotingPower scale to promote more equitable block production distribution.
+
+- Proposer priority increments by normalized sqrt(votingPower) instead of linear
+- Maintains all security invariants and Byzantine fault tolerance
+- Based on mathematical principle: cost = votes^2 for diminishing returns
+
+
+diff --git a/state/state_test.go b/state/state_test.go
+index 0c01c297e..03e1f0dee 100644
+--- a/state/state_test.go
++++ b/state/state_test.go
+@@ -431,9 +431,15 @@ func testProposerFreq(t *testing.T, caseNum int, valSet *types.ValidatorSet) {
+ 	}
+ 
+ 	// assert frequencies match expected (max off by 1)
++	// Collect all voting powers for normalized weight calculation
++	allVPs := make([]int64, N)
++	for i := 0; i < N; i++ {
++		_, v := valSet.GetByIndex(int32(i))
++		allVPs[i] = v.VotingPower
++	}
+ 	for i, freq := range freqs {
+ 		_, val := valSet.GetByIndex(int32(i))
+-		expectFreq := int(val.VotingPower) * runMult
++		expectFreq := int(normalizedWeight(val.VotingPower, totalPower, allVPs)) * runMult
+ 		gotFreq := freq
+ 		abs := int(math.Abs(float64(expectFreq - gotFreq)))
+ 
+@@ -450,6 +456,35 @@ func testProposerFreq(t *testing.T, caseNum int, valSet *types.ValidatorSet) {
+ 	}
+ }
+ 
++// scaledSqrt computes sqrt(vp << 32) for quadratic proposer selection test expectations.
++// Mirrors the fixed-point integer sqrt used in validator_set.go.
++func scaledSqrt(vp int64) int64 {
++	s := new(big.Int).Lsh(big.NewInt(vp), 32)
++	return s.Sqrt(s).Int64()
++}
++
++// normalizedWeight computes the expected priority increment for a validator
++// under quadratic proposer selection with normalization back to totalVP scale.
++func normalizedWeight(vp, totalVP int64, allVPs []int64) int64 {
++	sumOfScaled := int64(0)
++	for _, v := range allVPs {
++		sumOfScaled += scaledSqrt(v)
++	}
++	n := big.NewInt(scaledSqrt(vp))
++	n.Mul(n, big.NewInt(totalVP))
++	n.Div(n, big.NewInt(sumOfScaled))
++	return n.Int64()
++}
++
++// sumNormalized computes sumOfNormalized (may differ from totalVP due to integer truncation).
++func sumNormalized(totalVP int64, allVPs []int64) int64 {
++	sum := int64(0)
++	for _, vp := range allVPs {
++		sum += normalizedWeight(vp, totalVP, allVPs)
++	}
++	return sum
++}
++
+ // TestProposerPriorityDoesNotGetResetToZero assert that we preserve accum when calling updateState
+ // see https://github.com/tendermint/tendermint/issues/2718
+ func TestProposerPriorityDoesNotGetResetToZero(t *testing.T) {
+@@ -510,10 +545,14 @@ func TestProposerPriorityDoesNotGetResetToZero(t *testing.T) {
+ 	wantVal2Prio -= avg.Int64() // -61
+ 	wantVal1Prio -= avg.Int64() // 62
+ 
+-	// 4. Steps from IncrementProposerPriority
+-	wantVal1Prio += val1VotingPower // 72
+-	wantVal2Prio += val2VotingPower // 39
+-	wantVal1Prio -= totalPowerAfter // -38 as val1 is proposer
++	// 4. Steps from IncrementProposerPriority (quadratic normalized weights)
++	allVPs := []int64{val1VotingPower, val2VotingPower}
++	nw1 := normalizedWeight(val1VotingPower, totalPowerAfter, allVPs) // 26
++	nw2 := normalizedWeight(val2VotingPower, totalPowerAfter, allVPs) // 83
++	sumNorm := sumNormalized(totalPowerAfter, allVPs)                 // 109
++	wantVal1Prio += nw1    // 88
++	wantVal2Prio += nw2    // 22
++	wantVal1Prio -= sumNorm // -21 as val1 is proposer
+ 
+ 	assert.Equal(t, wantVal1Prio, updatedVal1.ProposerPriority)
+ 	assert.Equal(t, wantVal2Prio, addedVal2.ProposerPriority)
+@@ -525,7 +564,7 @@ func TestProposerPriorityDoesNotGetResetToZero(t *testing.T) {
+ 	validatorUpdates, err = types.PB2TM.ValidatorUpdates([]abci.ValidatorUpdate{updateVal})
+ 	assert.NoError(t, err)
+ 
+-	// this will cause the diff of priorities (77)
++	// this will cause the diff of priorities (43)
+ 	// to be larger than threshold == 2*totalVotingPower (22):
+ 	updatedState3, err := sm.UpdateState(updatedState2, blockID, &block.Header, abciResponses, validatorUpdates)
+ 	assert.NoError(t, err)
+@@ -537,26 +576,35 @@ func TestProposerPriorityDoesNotGetResetToZero(t *testing.T) {
+ 	_, updatedVal2 := updatedState3.NextValidators.GetByAddress(val2PubKey.Address())
+ 
+ 	// 2. Scale
+-	// old prios: v1(10):-38, v2(1):39
++	// old prios: v1(10):-21, v2(1):22
+ 	wantVal1Prio = prevVal1.ProposerPriority
+ 	wantVal2Prio = prevVal2.ProposerPriority
+-	// scale to diffMax = 22 = 2 * tvp, diff=39-(-38)=77
++	// scale to diffMax = 22 = 2 * tvp, diff=22-(-21)=43
+ 	// new totalPower
+ 	totalPower := updatedVal1.VotingPower + updatedVal2.VotingPower
+ 	dist := wantVal2Prio - wantVal1Prio
+-	// ratio := (dist + 2*totalPower - 1) / 2*totalPower = 98/22 = 4
++	// ratio := (dist + 2*totalPower - 1) / 2*totalPower = 64/22 = 2
+ 	ratio := (dist + 2*totalPower - 1) / (2 * totalPower)
+-	// v1(10):-38/4, v2(1):39/4
+-	wantVal1Prio /= ratio // -9
+-	wantVal2Prio /= ratio // 9
++	// v1(10):-21/2, v2(1):22/2
++	wantVal1Prio /= ratio // -10
++	wantVal2Prio /= ratio // 11
+ 
+ 	// 3. Center - noop
+-	// 4. IncrementProposerPriority() ->
+-	// v1(10):-9+10, v2(1):9+1 -> v2 proposer so subsract tvp(11)
+-	// v1(10):1, v2(1):-1
+-	wantVal2Prio += updatedVal2.VotingPower // 10 -> prop
+-	wantVal1Prio += updatedVal1.VotingPower // 1
+-	wantVal2Prio -= totalPower              // -1
++	// 4. IncrementProposerPriority() with quadratic normalized weights ->
++	// v1(10):-10+8, v2(1):11+2 -> v2 proposer so subtract sumNorm(10)
++	// v1(10):-2, v2(1):3
++	allVPs2 := []int64{updatedVal1.VotingPower, updatedVal2.VotingPower}
++	nwU1 := normalizedWeight(updatedVal1.VotingPower, totalPower, allVPs2)  // 8
++	nwU2 := normalizedWeight(updatedVal2.VotingPower, totalPower, allVPs2)  // 2
++	sumNorm2 := sumNormalized(totalPower, allVPs2)                          // 10
++	wantVal1Prio += nwU1  // -2
++	wantVal2Prio += nwU2  // 13
++	// highest prio is proposer, subtract sumNorm
++	if wantVal1Prio >= wantVal2Prio {
++		wantVal1Prio -= sumNorm2
++	} else {
++		wantVal2Prio -= sumNorm2 // 3
++	}
+ 
+ 	assert.Equal(t, wantVal2Prio, updatedVal2.ProposerPriority)
+ 	assert.Equal(t, wantVal1Prio, updatedVal1.ProposerPriority)
+diff --git a/types/validator_set.go b/types/validator_set.go
+index 434ae916e..4112ddd09 100644
+--- a/types/validator_set.go
++++ b/types/validator_set.go
+@@ -1,3 +1,17 @@
++// Quadratic Proposer Selection
++//
++// Replaces CometBFT's linear proposer selection.
++// Quadratic Proposer weight is proportional to sqrt(stake) rather than stake,
++// normalized to totalVotingPower scale:
++//
++//   weight_i = (sqrt(s_i) / sum(sqrt(s_j))) * totalVP
++//
++// sqrt is computed as isqrt(stake << 32) for 16-bit fixed-point precision.
++// BFT commit voting remains linear -- only block production frequency changes.
++//
++// Equilibrium: subadditive weighting taxes concentration, operational costs
++// tax fragmentation.
++
+ package types
+ 
+ import (
+@@ -30,6 +44,11 @@ const (
+ 	// total voting power gives the maximum allowed distance between validator
+ 	// priorities.
+ 	PriorityWindowSizeFactor = 2
++
++	// quadraticResolution is the number of bits to left-shift voting power
++	// before computing isqrt for quadratic proposer selection.
++	// This provides higher granularity (2^16) in sqrt output.
++	quadraticResolution = 32
+ )
+ 
+ // ErrTotalVotingPowerOverflow is returned if the total voting power of the
+@@ -179,19 +198,47 @@ func (vals *ValidatorSet) RescalePriorities(diffMax int64) {
+ }
+ 
+ func (vals *ValidatorSet) incrementProposerPriority() *Validator {
++	sumOfScaled := big.NewInt(vals.getSumOfScaledQuadraticWeights())
++	totalVotingPower := big.NewInt(vals.TotalVotingPower())
++	sumOfNormalized := int64(0)
++
+ 	for _, val := range vals.Validators {
+-		// Check for overflow for sum.
+-		newPrio := safeAddClip(val.ProposerPriority, val.VotingPower)
+-		val.ProposerPriority = newPrio
++		normalized := big.NewInt(0)
++
++		// Only compute normalization if we have voting power.
++		if sumOfScaled.Sign() > 0 {
++			// (scaled * totalVP) / sumOfScaledWeights
++			normalized = big.NewInt(getScaledQuadraticWeight(val.VotingPower))
++			normalized.Mul(normalized, totalVotingPower)
++			normalized.Div(normalized, sumOfScaled)
++		}
++		sumOfNormalized = safeAddClip(sumOfNormalized, normalized.Int64())
++		val.ProposerPriority = safeAddClip(val.ProposerPriority, normalized.Int64())
+ 	}
+-	// Decrement the validator with most ProposerPriority.
++
++	// Decrement sum of normalized weights from highest priority validator.
+ 	mostest := vals.getValWithMostPriority()
+-	// Mind the underflow.
+-	mostest.ProposerPriority = safeSubClip(mostest.ProposerPriority, vals.TotalVotingPower())
++	// Mind the underflow
++	mostest.ProposerPriority = safeSubClip(mostest.ProposerPriority, sumOfNormalized)
+ 
+ 	return mostest
+ }
+ 
++// getScaledQuadraticWeight returns sqrt(votingPower) with fixed-point precision.
++func getScaledQuadraticWeight(votingPower int64) int64 {
++	scaled := big.NewInt(votingPower)
++	scaled.Lsh(scaled, quadraticResolution) // votingPower << 32
++	return scaled.Sqrt(scaled).Int64()      // sqrt(scaled)
++}
++
++func (vals *ValidatorSet) getSumOfScaledQuadraticWeights() int64 {
++	sumOfScaled := int64(0)
++	for _, val := range vals.Validators {
++		sumOfScaled = safeAddClip(sumOfScaled, getScaledQuadraticWeight(val.VotingPower))
++	}
++	return sumOfScaled
++}
++
+ // Should not be called on an empty validator set.
+ func (vals *ValidatorSet) computeAvgProposerPriority() int64 {
+ 	n := int64(len(vals.Validators))
+diff --git a/types/validator_set_test.go b/types/validator_set_test.go
+index 41fcb8fc9..620144ac8 100644
+--- a/types/validator_set_test.go
++++ b/types/validator_set_test.go
+@@ -4,6 +4,7 @@ import (
+ 	"bytes"
+ 	"fmt"
+ 	"math"
++	"math/big"
+ 	"sort"
+ 	"strings"
+ 	"testing"
+@@ -231,11 +232,11 @@ func TestProposerSelection1(t *testing.T) {
+ 		proposers = append(proposers, string(val.Address))
+ 		vset.IncrementProposerPriority(1)
+ 	}
+-	expected := `foo baz foo bar foo foo baz foo bar foo foo baz foo foo bar foo baz foo foo bar` +
+-		` foo foo baz foo bar foo foo baz foo bar foo foo baz foo foo bar foo baz foo foo bar` +
+-		` foo baz foo foo bar foo baz foo foo bar foo baz foo foo foo baz bar foo foo foo baz` +
+-		` foo bar foo foo baz foo bar foo foo baz foo bar foo foo baz foo bar foo foo baz foo` +
+-		` foo bar foo baz foo foo bar foo baz foo foo bar foo baz foo foo`
++	expected := `foo baz bar foo foo baz bar foo baz foo bar foo baz bar foo foo baz bar foo foo` +
++		` baz bar foo baz foo bar foo baz foo bar foo baz foo bar foo baz bar foo baz foo bar` +
++		` foo baz foo bar foo baz foo bar foo baz foo bar baz foo bar foo baz foo bar foo baz` +
++		` foo bar foo baz foo bar baz foo foo bar baz foo foo bar baz foo baz foo bar foo baz` +
++		` bar foo foo baz bar foo foo baz bar foo baz foo bar foo baz foo`
+ 	if expected != strings.Join(proposers, " ") {
+ 		t.Errorf("expected sequence of proposers was\n%v\nbut got \n%v", expected, strings.Join(proposers, " "))
+ 	}
+@@ -259,7 +260,7 @@ func TestProposerSelection2(t *testing.T) {
+ 		vals.IncrementProposerPriority(1)
+ 	}
+ 
+-	// One validator has more than the others, but not enough to propose twice in a row
++	// One validator has enough power to propose twice in a row
+ 	*val2 = *newValidator(addr2, 400)
+ 	vals = NewValidatorSet(valList)
+ 	// vals.IncrementProposerPriority(1)
+@@ -274,7 +275,7 @@ func TestProposerSelection2(t *testing.T) {
+ 	}
+ 
+ 	// One validator has more than the others, and enough to be proposer twice in a row
+-	*val2 = *newValidator(addr2, 401)
++	*val2 = *newValidator(addr2, 1602)
+ 	vals = NewValidatorSet(valList)
+ 	prop = vals.GetProposer()
+ 	if !bytes.Equal(prop.Address, addr2) {
+@@ -292,7 +293,7 @@ func TestProposerSelection2(t *testing.T) {
+ 	}
+ 
+ 	// each validator should be the proposer a proportional number of times
+-	val0, val1, val2 = newValidator(addr0, 4), newValidator(addr1, 5), newValidator(addr2, 3)
++	val0, val1, val2 = newValidator(addr0, 9), newValidator(addr1, 36), newValidator(addr2, 81)
+ 	valList = []*Validator{val0, val1, val2}
+ 	propCount := make([]int, 3)
+ 	vals = NewValidatorSet(valList)
+@@ -304,28 +305,28 @@ func TestProposerSelection2(t *testing.T) {
+ 		vals.IncrementProposerPriority(1)
+ 	}
+ 
+-	if propCount[0] != 40*N {
++	if propCount[0] != 20*N {
+ 		t.Fatalf(
+-			"Expected prop count for validator with 4/12 of voting power to be %d/%d. Got %d/%d",
+-			40*N,
++			"Expected prop count for validator with 2/12 of voting power to be %d/%d. Got %d/%d",
++			20*N,
+ 			120*N,
+ 			propCount[0],
+ 			120*N,
+ 		)
+ 	}
+-	if propCount[1] != 50*N {
++	if propCount[1] != 40*N {
+ 		t.Fatalf(
+-			"Expected prop count for validator with 5/12 of voting power to be %d/%d. Got %d/%d",
+-			50*N,
++			"Expected prop count for validator with 4/12 of voting power to be %d/%d. Got %d/%d",
++			40*N,
+ 			120*N,
+ 			propCount[1],
+ 			120*N,
+ 		)
+ 	}
+-	if propCount[2] != 30*N {
++	if propCount[2] != 60*N {
+ 		t.Fatalf(
+-			"Expected prop count for validator with 3/12 of voting power to be %d/%d. Got %d/%d",
+-			30*N,
++			"Expected prop count for validator with 6/12 of voting power to be %d/%d. Got %d/%d",
++			60*N,
+ 			120*N,
+ 			propCount[2],
+ 			120*N,
+@@ -586,7 +587,19 @@ func TestAveragingInIncrementProposerPriorityWithVotingPower(t *testing.T) {
+ 	vp1 := int64(1)
+ 	vp2 := int64(1)
+ 	total := vp0 + vp1 + vp2
+-	avg := (vp0 + vp1 + vp2 - total) / 3
++
++	// Compute normalized weights (same math as incrementProposerPriority)
++	sw0 := big.NewInt(getScaledQuadraticWeight(vp0))
++	sw1 := big.NewInt(getScaledQuadraticWeight(vp1))
++	sw2 := big.NewInt(getScaledQuadraticWeight(vp2))
++	sumSW := new(big.Int).Add(sw0, new(big.Int).Add(sw1, sw2))
++	totalBig := big.NewInt(total)
++	n0 := new(big.Int).Div(new(big.Int).Mul(new(big.Int).Set(sw0), totalBig), sumSW).Int64()
++	n1 := new(big.Int).Div(new(big.Int).Mul(new(big.Int).Set(sw1), totalBig), sumSW).Int64()
++	n2 := new(big.Int).Div(new(big.Int).Mul(new(big.Int).Set(sw2), totalBig), sumSW).Int64()
++	sumN := n0 + n1 + n2 // what gets subtracted from mostest each round
++	avg := (n0 + n1 + n2 - sumN) / 3
++
+ 	vals := ValidatorSet{Validators: []*Validator{
+ 		{Address: []byte{0}, ProposerPriority: 0, VotingPower: vp0},
+ 		{Address: []byte{1}, ProposerPriority: 0, VotingPower: vp1},
+@@ -601,10 +614,10 @@ func TestAveragingInIncrementProposerPriorityWithVotingPower(t *testing.T) {
+ 		0: {
+ 			vals.Copy(),
+ 			[]int64{
+-				// Acumm+VotingPower-Avg:
+-				0 + vp0 - total - avg, // mostest will be subtracted by total voting power (12)
+-				0 + vp1,
+-				0 + vp2,
++				// Acumm+NormalizedWeight-Avg:
++				0 + n0 - sumN - avg, // mostest will be subtracted by sumN (11)
++				0 + n1,
++				0 + n2,
+ 			},
+ 			1,
+ 			vals.Validators[0],
+@@ -612,19 +625,19 @@ func TestAveragingInIncrementProposerPriorityWithVotingPower(t *testing.T) {
+ 		1: {
+ 			vals.Copy(),
+ 			[]int64{
+-				(0 + vp0 - total) + vp0 - total - avg, // this will be mostest on 2nd iter, too
+-				(0 + vp1) + vp1,
+-				(0 + vp2) + vp2,
++				0 + 2*n0 - sumN, // not mostest on 2nd iter
++				0 + 2*n1 - sumN, // now this val is mostest for the 1st time (tie with val2, smaller addr wins)
++				0 + 2*n2,
+ 			},
+ 			2,
+-			vals.Validators[0],
+-		}, // increment twice -> expect average to be subtracted twice
++			vals.Validators[1],
++		},
+ 		2: {
+ 			vals.Copy(),
+ 			[]int64{
+-				0 + 3*(vp0-total) - avg, // still mostest
+-				0 + 3*vp1,
+-				0 + 3*vp2,
++				0 + 3*n0 - 2*sumN - avg, // mostest again
++				0 + 3*n1 - sumN,
++				0 + 3*n2,
+ 			},
+ 			3,
+ 			vals.Validators[0],
+@@ -632,29 +645,29 @@ func TestAveragingInIncrementProposerPriorityWithVotingPower(t *testing.T) {
+ 		3: {
+ 			vals.Copy(),
+ 			[]int64{
+-				0 + 4*(vp0-total), // still mostest
+-				0 + 4*vp1,
+-				0 + 4*vp2,
++				0 + 4*n0 - 2*sumN, // not mostest this iter
++				0 + 4*n1 - sumN,
++				0 + 4*n2 - sumN, // now this val is mostest for the 1st time
+ 			},
+ 			4,
+-			vals.Validators[0],
++			vals.Validators[2],
+ 		},
+ 		4: {
+ 			vals.Copy(),
+ 			[]int64{
+-				0 + 4*(vp0-total) + vp0, // 4 iters was mostest
+-				0 + 5*vp1 - total,       // now this val is mostest for the 1st time (hence -12==totalVotingPower)
+-				0 + 5*vp2,
++				0 + 5*n0 - 3*sumN, // 3 iters was mostest
++				0 + 5*n1 - sumN,   // after 2 iters this val was "mostest" once and not in between
++				0 + 5*n2 - sumN,   // after 4 iters this val was "mostest" once and not in between
+ 			},
+ 			5,
+-			vals.Validators[1],
++			vals.Validators[0],
+ 		},
+ 		5: {
+ 			vals.Copy(),
+ 			[]int64{
+-				0 + 6*vp0 - 5*total, // mostest again
+-				0 + 6*vp1 - total,   // mostest once up to here
+-				0 + 6*vp2,
++				0 + 6*n0 - 4*sumN, // mostest again
++				0 + 6*n1 - sumN,   // mostest once up to here
++				0 + 6*n2 - sumN,   // mostest once up to here
+ 			},
+ 			6,
+ 			vals.Validators[0],
+@@ -662,9 +675,9 @@ func TestAveragingInIncrementProposerPriorityWithVotingPower(t *testing.T) {
+ 		6: {
+ 			vals.Copy(),
+ 			[]int64{
+-				0 + 7*vp0 - 6*total, // in 7 iters this val is mostest 6 times
+-				0 + 7*vp1 - total,   // in 7 iters this val is mostest 1 time
+-				0 + 7*vp2,
++				0 + 7*n0 - 5*sumN, // in 7 iters this val is mostest 5 times
++				0 + 7*n1 - sumN,   // in 7 iters this val is mostest 1 time
++				0 + 7*n2 - sumN,   // in 7 iters this val is mostest 1 time
+ 			},
+ 			7,
+ 			vals.Validators[0],
+@@ -672,40 +685,40 @@ func TestAveragingInIncrementProposerPriorityWithVotingPower(t *testing.T) {
+ 		7: {
+ 			vals.Copy(),
+ 			[]int64{
+-				0 + 8*vp0 - 7*total, // mostest again
+-				0 + 8*vp1 - total,
+-				0 + 8*vp2,
++				0 + 8*n0 - 5*sumN, // not mostest this iter
++				0 + 8*n1 - 2*sumN, // mostest again (tie with val2, smaller addr wins)
++				0 + 8*n2 - sumN,
+ 			},
+ 			8,
+-			vals.Validators[0],
++			vals.Validators[1],
+ 		},
+ 		8: {
+ 			vals.Copy(),
+ 			[]int64{
+-				0 + 9*vp0 - 7*total,
+-				0 + 9*vp1 - total,
+-				0 + 9*vp2 - total,
+-			}, // mostest
++				0 + 9*n0 - 6*sumN, // mostest again
++				0 + 9*n1 - 2*sumN,
++				0 + 9*n2 - sumN,
++			},
+ 			9,
+-			vals.Validators[2],
++			vals.Validators[0],
+ 		},
+ 		9: {
+ 			vals.Copy(),
+ 			[]int64{
+-				0 + 10*vp0 - 8*total, // after 10 iters this is mostest again
+-				0 + 10*vp1 - total,   // after 6 iters this val is "mostest" once and not in between
+-				0 + 10*vp2 - total,
+-			}, // in between 10 iters this val is "mostest" once
++				0 + 10*n0 - 6*sumN, // not mostest this iter
++				0 + 10*n1 - 2*sumN, // after 8 iters this val is "mostest" twice and not in between
++				0 + 10*n2 - 2*sumN,
++			}, // in 10 iters this val is "mostest" twice
+ 			10,
+-			vals.Validators[0],
++			vals.Validators[2],
+ 		},
+ 		10: {
+ 			vals.Copy(),
+ 			[]int64{
+-				0 + 11*vp0 - 9*total,
+-				0 + 11*vp1 - total, // after 6 iters this val is "mostest" once and not in between
+-				0 + 11*vp2 - total,
+-			}, // after 10 iters this val is "mostest" once
++				0 + 11*n0 - 7*sumN, // mostest 7 times, cycle complete (all prios return to 0)
++				0 + 11*n1 - 2*sumN, // after 8 iters this val is "mostest" twice and not since
++				0 + 11*n2 - 2*sumN,
++			}, // after 10 iters this val is "mostest" twice
+ 			11,
+ 			vals.Validators[0],
+ 		},

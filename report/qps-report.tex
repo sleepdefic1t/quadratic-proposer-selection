@@ -1,0 +1,409 @@
+\documentclass[11pt,a4paper]{article}
+
+\usepackage[margin=1in]{geometry}
+\usepackage{amsmath,amssymb,amsthm}
+\usepackage{booktabs}
+\usepackage{hyperref}
+\usepackage{float}
+\usepackage[numbers]{natbib}
+
+\hypersetup{
+    colorlinks=true,
+    linkcolor=blue,
+    citecolor=blue,
+    urlcolor=blue
+}
+
+\newtheorem{definition}{Definition}
+\newtheorem{theorem}{Theorem}
+\newtheorem{lemma}{Lemma}
+\newtheorem{proposition}{Proposition}
+\newtheorem{corollary}{Corollary}
+
+\title{Quadratic Proposer Selection:\\Sublinear Block Production in BFT Consensus}
+\author{S. Downey}
+\date{Technical Report --- July 2026}
+
+\begin{document}
+\maketitle
+
+\begin{abstract}
+In CometBFT and similar BFT consensus protocols, a validator's block production frequency is proportional to its stake. This report defines Quadratic Proposer Selection (QPS), a modification that replaces the linear proposer priority increment with a square-root-weighted increment while leaving commit voting power, the quorum threshold, and reward distribution unchanged. The selection frequency ratio between two validators with stake ratio $k$ compresses from $k$ to $\sqrt{k}$. Because the safety-critical quorum computation is untouched, existing BFT safety proofs apply without modification, and infrastructure that verifies commits against linear voting power---light clients, IBC relayers---is unaffected. The exact economic gain from Sybil splitting under QPS is derived and shown to be bounded by the proposer premium, and the condition under which this bound fails is characterized: when proposers capture substantial non-protocol income such as MEV, sublinear selection alone is not Sybil-safe. The mechanism is generalized to the family $f(s) = s^\theta$, and $\theta = 1/2$ is located on the resulting compression--splitting tradeoff. QPS is implemented in a fork of CometBFT, with the change confined to the proposer-priority increment in the validator-set logic. The implementation is validated on a testnet that has operated for 95 days across 1.39 million blocks while its validator set grew from 7 to 41 validators and contracted to 6, through analysis of eight membership-stable windows totaling more than 579{,}000 blocks. In seven of the eight windows the observed block production distribution matches the predicted square-root weighting nearly exactly; one deviates measurably, and the deviation coincides with measured intermittent validator unavailability, demonstrating the sensitivity of the check. Observed Gini coefficient reductions against the linear counterfactual are 51--56\% across set sizes from 38 down to 6 validators, consistent with cross-chain analysis of nine production validator sets (26--56\%, depending on the stake distribution).
+
+\bigskip
+This report was drafted with AI assistance. The mechanism design, implementation and validation are the author's original work.
+\end{abstract}
+
+\section{Introduction}
+
+Proof-of-stake consensus protocols in the Tendermint lineage \cite{kwon,buchman} select block proposers in proportion to stake: a validator with $k$ times the stake of another proposes $k$ times as many blocks. This linear coupling between capital and block production has two consequences for the validator set. First, block production---and the proposer's reward premium, fee income, and discretion over transaction ordering---concentrates at the same rate as stake. Second, validators at the lower end of the stake distribution propose rarely: stake ratios between the largest and smallest bonded validators on production chains range from roughly $10$ to beyond $10^{9}$ \cite{srsw}, and under linear selection the same ratios govern block production, so a validator holding $10^{-5}$ of total stake proposes once per $10^{5}$ blocks---at six-second intervals, roughly once a week---which weakens the economic and operational case for remaining in the set.
+
+Motepalli and Jacobsen \cite{srsw} quantified stake concentration across ten production blockchains and proposed Square Root Stake Weight (SRSW): replace each validator's consensus weight $s_i$ with $\sqrt{s_i}$. Their analysis demonstrates substantial improvements in standard decentralization metrics (Gini index, Nakamoto coefficients, HHI). However, SRSW transforms the weight used \emph{everywhere} in consensus, including the quorum certificate: a block commits when signatures exceed $\frac{2}{3}\sum_j \sqrt{s_j}$ rather than $\frac{2}{3}\sum_j s_j$. This changes the capital required to attack safety, requires re-deriving the BFT safety argument under the transformed weights, and necessitates coordinated updates to every component that verifies commits against linear voting power, including light clients and IBC relayers.
+
+This report makes a narrower intervention. Quadratic Proposer Selection (QPS) applies the square-root transformation to exactly one surface: the proposer priority increment in CometBFT's weighted round-robin. Commit signatures, the quorum threshold, and reward distribution remain linear in stake. The block production distribution compresses exactly as under SRSW---the two mechanisms induce identical proposer frequencies for a given validator set---but the safety-critical machinery is untouched.
+
+The contributions are:
+
+\begin{enumerate}
+    \item \textbf{Mechanism.} A formal definition of QPS as a modification of CometBFT's proposer selection (Section~\ref{sec:qps}), with the observation that BFT safety is preserved by construction because the quorum computation is not modified (Section~\ref{sec:safety}).
+    \item \textbf{Economic analysis.} An exact expression for the proposer-share gain from splitting stake across $n$ identities (Section~\ref{sec:sybil}), its upper bound, and the resulting reward gain $\Delta R = B \cdot \Delta\alpha$ where $B$ is the proposer premium as a fraction of total rewards. The dependence on $B$ is made explicit: for chains where $B$ is small (protocol proposer bonuses, no significant MEV), splitting is unprofitable against per-identity costs; for chains where proposers capture substantial non-protocol income, it is not (Section~\ref{sec:scope}). Sybil resistance under sublinear selection is a property of the reward architecture, not of the selection rule.
+    \item \textbf{Design space.} A generalization to weight families $f(s) = s^\theta$, $\theta \in [0,1]$, making the tradeoff between distribution compression ($k^\theta$) and splitting incentive ($n^{1-\theta}$) explicit, and locating $\theta = 1/2$ on it (Section~\ref{sec:family}).
+    \item \textbf{Implementation.} A deterministic integer implementation in LythiumBFT, a fork of CometBFT: one modified function, two added helpers, and one added constant, with no changes to quorum logic, reward logic, or the application-layer interface (Section~\ref{sec:impl}).
+    \item \textbf{Longitudinal validation.} Measurements from a testnet operated for 95 days and 1.39 million blocks, across which the validator set grew from 7 to 41 and contracted to 6. Analysis of eight membership-stable windows totaling over 579{,}000 blocks at set sizes between 38 and 6 validators shows that observed block production matches the square-root prediction in every window in which proposers remained available, the one deviating window coincides with measured intermittent validator unavailability, and observed Gini reductions against the linear counterfactual hold at 51--56\% across set sizes (Section~\ref{sec:empirical}). Cross-chain analysis of eight production networks and the deployment testnet shows the same compression applies across real stake distributions.
+\end{enumerate}
+
+Because the two mechanisms induce identical proposer frequencies for a given validator set, SRSW's cross-chain analysis and the measurements reported here are independent evidence of the same distributional effect. Section~\ref{sec:related} compares the mechanisms in detail.
+
+\section{Background: Proposer Selection in CometBFT}
+\label{sec:background}
+
+CometBFT selects proposers with a deterministic weighted round-robin \cite{cometbft}. Each validator $v_i$ with voting power $s_i$ carries a persistent integer priority $p_i$. With $P = \sum_j s_j$, each selection round performs:
+
+\begin{enumerate}
+    \item $p_i \leftarrow p_i + s_i$ for every validator;
+    \item the validator with the highest priority becomes proposer;
+    \item the proposer's priority is reduced: $p_{\text{prop}} \leftarrow p_{\text{prop}} - P$.
+\end{enumerate}
+
+Steps 1--3 net to zero across the set ($\sum_i p_i$ is invariant), and over $R$ consecutive rounds with stable voting powers each validator is selected $R \cdot s_i / P + O(1)$ times \cite{cometbft}; the schedule is deterministic---a given validator set yields a fixed proposer sequence rather than a random draw. Two auxiliary operations maintain numerical hygiene without affecting selection frequency: priorities are recentered around zero, and when the spread $\max_i p_i - \min_i p_i$ exceeds $2P$ all priorities are rescaled proportionally. Validators entering the set are assigned priority $-1.125 \cdot P$, placing them behind the current rotation.
+
+Safety is enforced elsewhere: a block commits only with signatures from validators holding $> \frac{2}{3} P$ of voting power. The proposer selection algorithm has no role in the safety argument; a Byzantine proposer can delay progress but cannot by itself cause conflicting commits, and view changes rotate past unavailable proposers \cite{buchman,bravo}.
+
+\section{Quadratic Proposer Selection}
+\label{sec:qps}
+
+\begin{definition}[QPS]
+\label{def:qps}
+Given validators $\{v_1, \ldots, v_n\}$ with stakes $\{s_1, \ldots, s_n\}$ and $P = \sum_j s_j$, define the QPS weight
+\begin{equation}
+\label{eq:weight}
+w_i = \left\lfloor \frac{\sqrt{s_i}}{\sum_{j=1}^{n} \sqrt{s_j}} \cdot P \right\rfloor .
+\end{equation}
+QPS replaces the priority increment in step (1) of the round-robin with $p_i \leftarrow p_i + w_i$, and the decrement in step (3) with $p_{\text{prop}} \leftarrow p_{\text{prop}} - W$ where $W = \sum_i w_i$. All other uses of voting power---commit signatures, quorum computation, reward distribution---continue to use $s_i$.
+\end{definition}
+
+The normalization to scale $P$ in Equation~\eqref{eq:weight} keeps priorities in the magnitude range the surrounding CometBFT machinery (recentering, rescaling, the new-validator penalty) was designed for; it does not affect relative selection frequency. Over rounds with stable stakes, the induced selection frequency is
+\begin{equation}
+\label{eq:freq}
+f(v_i) = \frac{w_i}{W} \approx \frac{\sqrt{s_i}}{\sum_j \sqrt{s_j}},
+\end{equation}
+with the approximation exact up to the floor in Equation~\eqref{eq:weight}, whose effect is bounded in Section~\ref{sec:impl}. For two validators with $s_a = k \cdot s_b$, the selection ratio compresses from $k:1$ to $\sqrt{k}:1$. When all stakes are equal, $w_i = \lfloor P/n \rfloor$ for every validator and QPS coincides with the unmodified algorithm.
+
+\textbf{Naming.} Following the convention of Quadratic Voting \cite{qv}, ``quadratic'' refers to the cost of influence rather than the weight function: under selection frequency $\propto \sqrt{s}$, doubling one's share of block production requires quadrupling stake. Quadratic Voting imposes the quadratic cost at purchase time (casting $n$ votes costs $n^2$ tokens); QPS imposes it structurally on the holding.
+
+\textbf{Zero-weight edge case.} The floor in Equation~\eqref{eq:weight} yields $w_i = 0$ when $\sqrt{s_i} \cdot P < \sum_j \sqrt{s_j}$, i.e., for validators sufficiently small relative to the set; such a validator would never propose. A chain's minimum self-bond keeps deployments away from this regime: across the eight analyzed windows of Section~\ref{sec:windows} (minimum stake $10^5$ tokens, set sizes 6--38, stake spread below $8\times$), the smallest weight produced by Equation~\eqref{eq:weight} was $1.3 \times 10^{5}$, five orders of magnitude above the floor. Deployments with very large sets or extreme stake spreads must check this bound against their own parameters.
+
+\section{Safety, Liveness, and the Deployment Surface}
+\label{sec:safety}
+
+The threat model is CometBFT's: a Byzantine adversary controlling less than $1/3$ of total voting power, partial synchrony for liveness \cite{buchman,bravo}. The economic analysis of Section~\ref{sec:econ} additionally considers rational actors maximizing reward.
+
+\begin{theorem}[Safety preservation]
+\label{thm:safety}
+QPS does not alter the Byzantine fault tolerance threshold or the safety argument of Tendermint consensus.
+\end{theorem}
+
+\begin{proof}
+Safety in Tendermint-family protocols rests on the quorum intersection property: any two commits require signature sets each exceeding $\frac{2}{3}P$ of linear voting power, hence intersecting in at least one correct validator \cite{buchman}. QPS modifies only the priority increment and decrement, which determine the \emph{order} in which validators propose. The voting power attached to each signature, the quorum condition $\sum_{i \in Q} s_i > \frac{2}{3}P$, and the validator set itself are unmodified. The safety proof therefore applies verbatim. Proposer order is immaterial to safety: the protocol is safe even under an adversarial proposer schedule, since a proposer can only propose, not commit.
+\end{proof}
+
+\textbf{Liveness.} Tendermint liveness requires that correct proposers are eventually selected; the round-robin guarantees every validator with $w_i > 0$ is selected infinitely often, and view changes skip unavailable proposers at a cost of one round timeout each \cite{bravo}. QPS changes the \emph{frequency} mix: lower-stake validators propose more often than under linear selection. If lower-stake validators run less reliable infrastructure, the expected rate of skipped rounds increases proportionally to the frequency shift. This is an operational consideration, not a protocol one---the fallback machinery is unchanged---but operators of chains with highly heterogeneous infrastructure quality should expect proposer-timeout rates to reflect the reweighted mix. Section~\ref{sec:empirical} reports the observed block-interval record for the deployment chain.
+
+\textbf{Deployment surface.} The practical distinction between QPS and weight-transformation approaches such as SRSW is what must change downstream. Commit verification---performed by light clients, IBC relayers and counterparty chains, bridges, and monitoring infrastructure---checks that signature weight exceeds $\frac{2}{3}$ of a known validator set's linear voting power. Under SRSW, every such verifier must adopt the transformed weights, coordinated with the chain's switchover. Under QPS, commit verification is unchanged: commits carry linear voting power and validate exactly as in the unmodified protocol, so the change is not observable outside the proposer selection loop. The application layer is likewise unaffected: the staking module continues to report linear voting power over ABCI, and the transformation is applied entirely inside consensus (Section~\ref{sec:impl}). The cost of this conservatism is scope: QPS improves the decentralization of block production only. Metrics defined over voting weight---in particular the Nakamoto coefficient for safety ($\frac{2}{3}$ threshold)---are unchanged by construction, whereas SRSW improves both \cite{srsw}.
+
+\section{Economic Analysis}
+\label{sec:econ}
+
+The square root is subadditive on positive reals: $\sqrt{a+b} < \sqrt{a} + \sqrt{b}$, since $(\sqrt{a}+\sqrt{b})^2 = a + b + 2\sqrt{ab} > a+b$. Subadditivity cuts both ways. Applied to proposer weight it taxes concentration---merged stake proposes less than the same stake split---and by the same token it rewards fission: an operator can increase aggregate proposer weight by dividing stake across identities. The first effect is the design goal; the second is the cost. This section quantifies both and identifies the parameter that separates deployments where the cost is negligible from those where it is decisive.
+
+\subsection{Concentration Tax}
+\label{sec:tax}
+
+For stake $s$ held by one validator versus distributed equally across $n$, the aggregate QPS weight is $\sqrt{s}$ versus $n \cdot \sqrt{s/n} = \sqrt{n}\,\sqrt{s}$: consolidation forfeits a factor $\sqrt{n}$ of proposer weight relative to the distributed alternative. Equivalently, between two validators with stake ratio $k$, the block production ratio is $\sqrt{k}$. A validator with $100\times$ the minimum stake proposes $10\times$ as often as a minimum-stake validator, not $100\times$. The tax applies only to proposer frequency: voting power and stake-proportional rewards are linear regardless of how stake is arranged.
+
+\subsection{Sybil Gain}
+\label{sec:sybil}
+
+Consider an operator holding stake $s$ as a single validator, with proposer share $\alpha = \sqrt{s}/\Sigma$ where $\Sigma = \sum_j \sqrt{s_j}$, and let $S = \Sigma - \sqrt{s}$ denote the other validators' aggregate root-stake.
+
+\begin{proposition}[Exact splitting gain]
+\label{prop:sybil}
+If the operator splits $s$ equally across $n$ validators (others unchanged), the proposer share becomes $\alpha' = \alpha + \Delta\alpha$ with
+\begin{equation}
+\label{eq:sybilgain}
+\Delta\alpha = (\sqrt{n} - 1) \cdot \alpha \cdot \frac{1 - \alpha}{\sqrt{n}\,\alpha + 1 - \alpha}.
+\end{equation}
+\end{proposition}
+
+\begin{proof}
+After the split the operator's identities contribute aggregate root-stake $n\sqrt{s/n} = \sqrt{n}\,\sqrt{s}$, so
+\[
+\Delta\alpha = \frac{\sqrt{n}\,\sqrt{s}}{\sqrt{n}\,\sqrt{s} + S} - \frac{\sqrt{s}}{\sqrt{s} + S}
+= \frac{\sqrt{s}\, S\,(\sqrt{n}-1)}{(\sqrt{n}\,\sqrt{s} + S)(\sqrt{s} + S)}.
+\]
+Substituting $S = \sqrt{s}\,(1-\alpha)/\alpha$ and simplifying yields Equation~\eqref{eq:sybilgain}.
+\end{proof}
+
+\begin{corollary}[Bounds]
+\label{cor:bounds}
+For all $\alpha \in (0,1)$ and $n \ge 1$:
+\[
+\Delta\alpha \;<\; \min\bigl( (\sqrt{n}-1)\,\alpha, \;\; 1 - \alpha \bigr).
+\]
+The first bound is tight as $\alpha \to 0$; the second follows from $\alpha' \le 1$. For $\alpha > 1/\sqrt{n}$ the first bound exceeds the second and Equation~\eqref{eq:sybilgain} should be used directly; e.g., at $\alpha = 0.5$, $n = 10$: $\Delta\alpha \approx 0.26$.
+\end{corollary}
+
+The proposer share is worth only the income that proposing carries. Let $B \in [0,1]$ denote the \emph{effective proposer premium}: the fraction of a validator's total income that accrues specifically through proposing (protocol proposer bonus, plus any fees or extractable value captured by the proposer role), as opposed to income proportional to stake regardless of who proposes. The reward gain from splitting, as a fraction of total network rewards, is
+\begin{equation}
+\label{eq:deltaR}
+\Delta R = B \cdot \Delta\alpha .
+\end{equation}
+
+On the deployment chain, block rewards are distributed to all validators proportionally to stake, with a proposer bonus of $B \approx 0.005$. A 10-way split by an operator holding a 10\% proposer share gains $\Delta\alpha < (\sqrt{10}-1) \cdot 0.10 \approx 0.216$, hence $\Delta R < 0.005 \cdot 0.216 \approx 0.11\%$ of network rewards; even a dominant operator at $\alpha = 0.5$ gains $\approx 0.13\%$. Against this stand the per-identity costs: on the deployment chain, a permanent burn of $10^5$ tokens per validator registration plus the marginal cost of operating each node. The gain is bounded and the costs scale linearly in $n$; splitting is unprofitable by a wide margin. Section~\ref{sec:scope} examines when this conclusion fails.
+
+\subsection{Scope of Validity: the Effective Premium}
+\label{sec:scope}
+
+Equation~\eqref{eq:deltaR} makes the Sybil conclusion conditional on $B$, and $B$ is a property of the chain's reward architecture, not of QPS. The protocol-defined proposer bonus is a lower bound on $B$; transaction fees retained by proposers and value extracted through transaction ordering (MEV) \cite{daian} raise the effective premium above it, in some ecosystems by orders of magnitude.
+
+To isolate the dependence, consider an operator holding $m$ units of minimum stake in a large set of minimum-stake validators. Held as one validator, the operator's proposer share is a factor $\sqrt{m}$ \emph{below} its stake share (the concentration tax); fully split into $m$ minimum-stake identities, proposer share equals stake share. In the small-operator limit, the ratio of post-split to pre-split income is
+\begin{equation}
+\label{eq:gainratio}
+G(m, B) = \frac{1}{(1-B) + B/\sqrt{m}} .
+\end{equation}
+
+\begin{table}[H]
+\centering
+\begin{tabular}{lrrr}
+\toprule
+Consolidation $m$ & $G$ at $B=0.005$ & $G$ at $B=0.10$ & $G$ at $B=0.30$ \\
+\midrule
+4   & 1.0025 & 1.053 & 1.176 \\
+16  & 1.0038 & 1.081 & 1.290 \\
+64  & 1.0044 & 1.096 & 1.356 \\
+\bottomrule
+\end{tabular}
+\caption{Income multiple from fully splitting an $m$-fold consolidated position, small-operator limit (Equation~\ref{eq:gainratio}).}
+\label{tab:premium}
+\end{table}
+
+At $B = 0.005$ the maximum gain is under half a percent and any per-identity cost dominates. At $B = 0.30$---representative of systems where the proposer role captures execution-layer fees and MEV in addition to a protocol bonus---a consolidated operator increases income by a third by splitting, and no plausible operational cost closes that gap. The boundary condition is explicit: \emph{sublinear proposer selection is Sybil-safe only where the reward architecture keeps the effective proposer premium small.} Chains with substantial proposer-captured MEV must either redistribute proposer income (smoothing, burn) before deploying sublinear selection, or impose per-identity costs commensurate with Equation~\eqref{eq:deltaR}.
+
+Conversely, where the precondition holds, the same algebra describes what QPS removes: under linear selection, MEV \emph{opportunities} accrue at stake share; under QPS they accrue at root-stake share, compressing the largest operators' ordering advantage by the same $\sqrt{k}$ factor as block production. The selection rule and the reward architecture are complementary levers.
+
+\subsection{Slashing Interaction}
+\label{sec:slashing}
+
+Since proposer weight is $\sqrt{s_i}$, a validator slashed by fraction $f$ retains $\sqrt{1-f}$ of its proposer weight while losing $f$ of its voting power: for $f = 0.5$, proposer frequency drops by $\approx 29\%$ against a $50\%$ stake loss. A slashed validator thus retains proposer access disproportionate to its remaining security contribution. The economic exposure is again bounded by $B$; under the small premiums where QPS is deployable (Section~\ref{sec:scope}), the residual proposer access carries correspondingly little value, but chains with aggressive slashing schedules should note the asymmetry.
+
+\subsection{Equilibrium}
+\label{sec:equilibrium}
+
+Two opposing forces act on validator count: subadditivity pushes stake apart (Section~\ref{sec:tax}), while per-identity costs---registration burns, infrastructure, key management---push it together. The marginal proposer-share gain from increasing an $n$-way split to $n+1$ decays as $O(1/\sqrt{n})$ while marginal identity cost is constant, so either splitting is unprofitable from the first identity (the desirable case, achieved when per-identity cost exceeds $B$ times the first marginal gain) or a finite crossing point exists. Fragmentation is bounded without governance intervention in either case. A full equilibrium characterization over heterogeneous stake distributions, including delegation dynamics---delegators' marginal effect on proposer frequency is larger at smaller validators since $d\sqrt{s}/ds$ is decreasing, which on chains that pass proposer income to delegators creates a mild self-balancing pressure---is left to future work.
+
+\section{The $s^\theta$ Design Space}
+\label{sec:family}
+
+QPS is one point in a family. For $f(s) = s^\theta$, $\theta \in [0,1]$, applied to the proposer increment:
+
+\begin{itemize}
+    \item \textbf{Compression.} The production ratio between validators with stake ratio $k$ is $k^\theta$: $\theta = 1$ is linear selection, $\theta = 0$ is equal-opportunity round-robin.
+    \item \textbf{Splitting incentive.} An $n$-way equal split multiplies aggregate weight by $n^{1-\theta}$: $1$ at $\theta = 1$ (splitting-neutral), $n$ at $\theta = 0$ (maximal).
+\end{itemize}
+
+The two exponents sum to one: compression is purchased exactly with splitting incentive. Equal-opportunity selection ($\theta = 0$)---the regime in which inverse-reward schemes and per-validator fairness arguments operate---is also the regime in which fabricating identities pays linearly, which is why round-robin systems require strong identity costs or closed sets. Linear selection ($\theta = 1$) needs no identity defense but concentrates production at the rate capital concentrates. $\theta = 1/2$ is the midpoint: production ratios compress to square roots while the splitting multiplier grows only as $\sqrt{n}$, slowly enough for modest per-identity costs to dominate it (Section~\ref{sec:sybil}). The analysis of Sections~\ref{sec:tax}--\ref{sec:scope} carries over with $\sqrt{\cdot}$ replaced by $(\cdot)^\theta$ throughout; Equation~\eqref{eq:sybilgain} holds with $\sqrt{n}$ replaced by $n^{1-\theta}$. Logarithmic weighting, proposed as LSW in \cite{srsw}, sits outside the power family but extends the same tradeoff: stronger compression, stronger splitting incentive. The deployment described here uses $\theta = 1/2$; chains with different identity-cost structures could justify other points, and the implementation of Section~\ref{sec:impl} is agnostic to the exponent.
+
+\section{Implementation}
+\label{sec:impl}
+
+QPS is implemented in LythiumBFT, a fork of CometBFT v0.38. The change modifies one function (\texttt{incrementProposerPriority}) and adds two helpers and one constant; no function signatures change and no other component of the validator-set logic is touched.
+
+\subsection{Deterministic Arithmetic}
+
+Floating-point square roots are not bit-reproducible across architectures and would allow nodes to disagree on the proposer, halting consensus. The implementation computes
+\begin{equation}
+\texttt{getScaledQuadraticWeight}(s_i) = \texttt{isqrt}(s_i \ll 32) = \lfloor \sqrt{s_i} \cdot 2^{16} \rfloor
+\end{equation}
+using arbitrary-precision integer square root (\texttt{big.Int.Sqrt}), giving 16 fractional bits of precision. The normalized increment is computed product-first,
+\begin{equation}
+w_i = \left\lfloor \frac{\texttt{isqrt}(s_i \ll 32) \cdot P}{\sum_j \texttt{isqrt}(s_j \ll 32)} \right\rfloor,
+\end{equation}
+in arbitrary precision before conversion to \texttt{int64}, which is weakly more precise than dividing first and bounds the per-validator error at one unit. All quantities are bounded: CometBFT caps total voting power at $2^{63}/8$, so each scaled weight is below $2^{46}$, their sum for any feasible set size is far below $2^{63}$, and $w_i \le P$ by construction. No overflow path exists.
+
+\subsection{Preserved Invariants}
+
+\textbf{Zero-sum.} Each round adds $\sum_i w_i$ across the set and subtracts the same quantity from the proposer; $\sum_i p_i$ is invariant. An early version of the implementation added $\lfloor\sqrt{s_i}\rfloor$ per validator but subtracted $\lfloor\sqrt{P}\rfloor$ from the proposer; by subadditivity (Section~\ref{sec:econ}) $\sum_i \sqrt{s_i} > \sqrt{P}$, producing positive priority drift each round. Normalizing the weights and using their exact sum for the decrement closes the drift path. The unnormalized variant is the most direct implementation of the idea and fails in exactly this way.
+
+\textbf{Truncation.} Flooring yields $W = \sum_i w_i \le P$ with $P - W < n$; the deficit is constant per round, does not accumulate (the decrement uses $W$, not $P$), and is absorbed by CometBFT's existing rescaling. The floor bias is directionally against smaller validators (a one-unit loss is a larger fraction of a small weight) but at deployment magnitudes ($P \approx 6 \times 10^6$, $n \le 41$) is below $10^{-4}$ relative error.
+
+\textbf{Rescaling and centering.} The existing machinery operates on priorities, not weights, and applies unmodified. Because QPS compresses the increment spread, the $2P$ rescaling threshold is reached less often than under linear weighting.
+
+\textbf{New-validator penalty.} Entrants are assigned $-1.125 \cdot P$ (unchanged, linear in $P$), but recover via sqrt-compressed increments. Relative to its proposer weight, a large entrant waits longer than under linear selection, raising the cost of join/leave cycling; a minimum-stake entrant recovers faster. The interaction favors the defender: the operators most able to cycle identities are penalized hardest. Combined with the splitting analysis (Section~\ref{sec:sybil}), the minimum self-bond should be set so that per-identity burn exceeds the discounted value of the compound splitting and fast-recovery gain.
+
+\subsection{Boundary}
+
+The application layer (a Cosmos SDK staking module) reports linear voting power through ABCI \texttt{ValidatorUpdate} messages, unaware of QPS; the transformation is applied inside consensus on each priority increment. Weights are recomputed from current voting powers every round, so validator-set changes require no special handling. Reward distribution, implemented in the application layer, remains stake-proportional with the proposer bonus described in Section~\ref{sec:sybil}.
+
+\section{Empirical Results}
+\label{sec:empirical}
+
+\subsection{Deployment Record}
+
+QPS has run on the Monolythium testnet (chain-id \texttt{mono\_6940-1}) since genesis on 2026-03-28. At the time of analysis (2026-07-01) the chain had produced 1{,}385{,}896 blocks in 95 days, a mean block interval of 5.934 seconds. Over this period the validator set grew from 7 validators at genesis to a peak of 41 and contracted to 6 as the network's successor testnet launched, providing observations at set sizes spanning 6 to 41 and through joins, departures, jailings, and delegation changes.
+
+The chain experienced one liveness interruption. At height 296{,}658 (2026-04-16), as operators began migrating to the successor network, 13 of 37 validators stopped signing; the remaining validators held 67.2\% of voting power, 0.6 percentage points above the two-thirds quorum, as recorded in the commits of the surrounding heights. The chain stalled for approximately 93 minutes at that height (with residual delays of 19 and 3 minutes over the following two heights) and resumed without a fork once sufficient power was again signing. This is BFT liveness semantics operating as specified---the protocol waits rather than forks when available power falls to the quorum threshold---and is orthogonal to proposer selection, which plays no role in quorum formation. In a scan of the full history at 1{,}000-block resolution, the segment containing the stall averaged 13.0 seconds per block and every other segment averaged below 8.3 seconds; within the eight analyzed windows (Section~\ref{sec:windows}) the maximum single inter-block interval was 17.7 seconds.
+
+\subsection{Methodology}
+
+CometBFT's proposer selection is deterministic: given stable weights, observed production should match Equation~\eqref{eq:freq} almost exactly, and a goodness-of-fit test functions as a check on implementation correctness rather than as statistical evidence about a stochastic process. Deviation would indicate an implementation fault or unaccounted set churn; agreement confirms the deployed code realizes the intended distribution. Pearson $\chi^2$ is reported in this spirit.
+
+Because predictions are well-defined only while the validator set is stable, membership-stable windows were identified by binary search over the full chain history: maximal height ranges within which no validator joined or left. Eight such windows, at set sizes of 38, 28, 17, 15, 11, 8, 7, and 6 validators, cover 579{,}523 blocks ($41.8\%$ of chain history); the final window was still open at the analysis cutoff. Delegation changes within windows were few and small---at most eight validators affected per window, every change but one below $4\%$ of the validator's power; the exception, a $+49\%$ delegation to one validator in W2, occurred within the first $0.7\%$ of that window's span---and predictions use end-of-window voting powers. For each window, observed per-validator block counts are compared against the QPS prediction and against the linear counterfactual $s_i/P$, reporting Gini coefficient, Nakamoto coefficient at the $1/3$ liveness threshold \cite{srinivasan}, and HHI.
+
+\subsection{Longitudinal Validation}
+\label{sec:windows}
+
+\begin{table}[H]
+\centering
+\small
+\begin{tabular}{lrrrrrrrr}
+\toprule
+Heights & Blocks & $n$ & $\chi^2$ & $p$ & Gini obs & Gini QPS & Gini lin & Nak.\ obs/lin \\
+\midrule
+W1: 378{,}789--421{,}150 & 42{,}362 & 38 & 0.89 & 1.000 & 0.124 & 0.124 & 0.282 & 10/5 \\
+W2: 626{,}176--662{,}643 & 36{,}468 & 28 & 2.95 & 1.000 & 0.108 & 0.110 & 0.235 & 8/5 \\
+W3: 799{,}095--847{,}473 & 48{,}379 & 17 & 27.45 & 0.037 & 0.116 & 0.114 & 0.251 & 5/3 \\
+W4: 887{,}102--947{,}909 & 60{,}808 & 15 & 5.97 & 0.967 & 0.121 & 0.119 & 0.261 & 4/3 \\
+W5: 967{,}322--1{,}043{,}218 & 75{,}897 & 11 & 1.20 & 0.999 & 0.132 & 0.131 & 0.281 & 3/2 \\
+W6: 1{,}070{,}288--1{,}124{,}745 & 54{,}458 & 8 & 0.03 & 1.000 & 0.130 & 0.130 & 0.275 & 2/2 \\
+W7: 1{,}124{,}746--1{,}136{,}201 & 11{,}456 & 7 & 0.13 & 1.000 & 0.140 & 0.139 & 0.288 & 2/2 \\
+W8: 1{,}136{,}202--1{,}385{,}896 & 249{,}695 & 6 & 0.06 & 1.000 & 0.130 & 0.130 & 0.270 & 2/1 \\
+\bottomrule
+\end{tabular}
+\caption{Membership-stable windows across 1.39M blocks of testnet history. ``Gini QPS'' is the prediction from end-of-window stakes; ``Gini lin'' is the linear counterfactual on the same stakes; ``Nak.\ obs/lin'' is the Nakamoto coefficient ($1/3$ threshold) of the observed distribution versus the linear counterfactual.}
+\label{tab:longitudinal}
+\end{table}
+
+In seven of the eight windows the observed distribution matches the QPS prediction nearly exactly ($\chi^2$ between 0.03 and 5.97 at 5--37 degrees of freedom; every per-validator observed/predicted ratio within $[0.96, 1.01]$), as expected for a correctly implemented deterministic algorithm. The observed Gini reduction against the linear counterfactual is stable at 51--56\% across set sizes from 38 down to 6 validators. The observed Nakamoto coefficient equals the QPS prediction in every window: it is $1.3$--$2\times$ the linear counterfactual in six windows, and equal to it in W6 and W7, where the compressed and linear distributions both require two validators to reach the $1/3$ threshold.
+
+W3 deviates ($p = 0.037$), and the deviation is informative. Three validators under-produced ($8.0\%$, $3.5\%$, and $2.7\%$ below prediction), with the complement spread across the other fourteen, each within $3\%$ above prediction. Membership was constant throughout: validator-set queries at 2{,}000-block sampling return the same 17 validators, and all 484 commits sampled at 100-block stride carry 17 signature slots. The sampled commit signatures locate the cause. The validators at $-8.0\%$ and $-3.5\%$ are absent from 15 and 4 of the 484 sampled commits respectively, in scattered episodes between heights 820{,}600 and 847{,}100, the latter's absences adjoining the window's largest inter-block gap (17.7 seconds, at height 844{,}592, against 10.6--12.6-second maxima in the clean windows); the validator at $-2.7\%$ signs every sampled commit, consistent with failures confined to its proposal rounds. When a scheduled proposer misses its round, the round timeout advances the schedule to the next-priority validator, transferring production from the unavailable validator to the rest of the set. The deterministic prediction holds when proposers are live; the check detects when they are not. W3 is reported unadjusted rather than excluded or corrected: it demonstrates both that the test has power to detect real deviations and what those deviations look like in practice.
+
+\subsection{Cross-Chain Analysis}
+
+To check that the compression is not an artifact of one chain's stake distribution, the $\sqrt{\cdot}$ transformation is applied to bonded validator sets from eight production chains and the deployment testnet (April 2026 snapshots; exact Gini computation on real stake vectors, no simulation).
+
+\begin{table}[H]
+\centering
+\begin{tabular}{lrrrr}
+\toprule
+Chain & $n$ & Gini (linear) & Gini ($\sqrt{}$) & Reduction \\
+\midrule
+Monolythium (testnet) & 37 & 0.284 & 0.126 & 55.5\% \\
+Aptos & 110 & 0.410 & 0.221 & 46.3\% \\
+Sui & 127 & 0.382 & 0.206 & 46.0\% \\
+Injective & 50 & 0.433 & 0.240 & 44.5\% \\
+Celestia & 95 & 0.517 & 0.318 & 38.6\% \\
+Osmosis & 91 & 0.603 & 0.400 & 33.7\% \\
+Cosmos Hub & 200 & 0.820 & 0.558 & 31.9\% \\
+Axelar & 53 & 0.335 & 0.234 & 30.0\% \\
+Polygon & 104 & 0.819 & 0.604 & 26.2\% \\
+\midrule
+\textit{Average} & & & & 39.2\% \\
+\bottomrule
+\end{tabular}
+\caption{Gini reduction from $\sqrt{}$-weighted selection on validator sets (eight production chains, one testnet; April 2026 snapshots). The reduction depends on distribution shape and is not a universal constant.}
+\label{tab:crosschain}
+\end{table}
+
+The 39.2\% average is consistent with SRSW's reported 36.2\% Gini improvement on their 2023--2024 ten-chain snapshot \cite{srsw}; eight chains overlap between the two samples and the snapshot dates differ, so the comparison is of magnitude rather than identity. Since SRSW and QPS induce identical proposer distributions for a given set, this table validates the shared primitive, not a difference between the mechanisms.
+
+\subsection{Threats to Validity}
+
+\begin{itemize}
+    \item \textbf{Set size.} All longitudinal observations are at $n \le 38$; the cross-chain table extends the math, but not live observation, to $n = 200$. The mechanism is set-size-agnostic, but there is no deployment evidence at large $n$.
+    \item \textbf{Cooperative environment.} Testnet validators are not economically adversarial; no splitting attacks, delegation games, or MEV extraction were attempted against the mechanism. The economic analysis of Section~\ref{sec:econ} is theory, validated only in its predictions about block production.
+    \item \textbf{What the $\chi^2$ shows.} Agreement between observed and predicted production confirms implementation correctness of a deterministic algorithm. It is not evidence that decentralization \emph{outcomes} (validator retention, stake distribution evolution) improve; those are longer-horizon questions the 95-day record cannot answer.
+    \item \textbf{Distribution dependence.} Gini reductions range 26--56\% across chains in Table~\ref{tab:crosschain}; the improvement is a function of the incoming stake distribution and no single number should be quoted as ``the'' effect of QPS.
+\end{itemize}
+
+\section{Related Work}
+\label{sec:related}
+
+\textbf{SRSW and LSW.} Motepalli and Jacobsen \cite{srsw} provide the systematic case for sublinear stake weighting: a metrics framework spanning Gini, Nakamoto coefficients (liveness and safety), HHI, Shapley values, and Zipf's coefficient, applied to ten production chains, with SRSW ($\sqrt{s}$) and LSW ($\log s$) as proposed mechanisms. They prove that SRSW and LSW weakly improve all considered metrics relative to linear weighting, and report average improvements of 51\% (SRSW) and 132\% (LSW). Their transformation applies to consensus weight globally---including quorum formation (their Equation 19) and, in their reward model, validator rewards ($r^*_i = \alpha\sqrt{s_i}$)---and their analysis prices the per-identity Sybil cost required to deter splitting, proposing minimum stake thresholds, capped validator-set cardinality, and external identity mechanisms as sources of it while acknowledging its establishment as beyond protocol scope. QPS differs on three axes. \emph{Surface}: the transformation touches proposer scheduling only; the safety threshold and reward distribution remain linear, so the BFT safety argument (Theorem~\ref{thm:safety}) and commit-verifying infrastructure are unchanged, at the cost of leaving the safety Nakamoto coefficient unimproved. \emph{Sybil structure}: because rewards stay stake-proportional, the splitting gain is confined to the proposer premium (Equation~\ref{eq:deltaR}) rather than applying to the full reward stream, shrinking the required identity cost from ``commensurate with rewards'' to ``commensurate with $B \cdot \Delta\alpha$''. \emph{Status}: SRSW is evaluated retroactively on snapshots; QPS has a live deployment record. Which transformation a chain adopts follows from these axes: improving safety-side concentration requires transforming the quorum weights, with the verifier migration and re-derived safety argument this entails; compressing block production alone requires neither.
+
+\textbf{Quadratic mechanisms.} Quadratic Voting \cite{qv} and its public-goods variant \cite{bhw} implement the principle that influence should cost quadratically, applied at purchase time to votes and contributions. QPS applies the same exponent structurally to block production scheduling: influence $\propto \sqrt{\text{capital}}$, hence capital $\propto$ influence$^2$.
+
+\textbf{Sybil attacks.} Douceur \cite{douceur} established that without a trusted identity authority, Sybil resistance must come from resource costs. In PoS the staked token is the resource; linear mechanisms are splitting-neutral by construction, and any strictly concave weighting reintroduces a splitting incentive that must be re-priced. Section~\ref{sec:scope} quantifies the price for proposer-side concavity.
+
+\textbf{MEV.} Daian et al.\ \cite{daian} documented value extraction through transaction ordering. For this report MEV enters as the dominant term in the effective proposer premium $B$, which gates where sublinear selection is deployable (Section~\ref{sec:scope}); conversely, where deployable, QPS compresses the distribution of ordering opportunities across validators.
+
+\textbf{Consensus foundations.} Tendermint consensus and its safety and liveness arguments are due to Kwon \cite{kwon}, Buchman \cite{buchman}, and Bravo et al.\ \cite{bravo}; the proposer selection algorithm QPS modifies is specified in \cite{cometbft}; the Nakamoto coefficient is due to Srinivasan and Lee \cite{srinivasan}.
+
+\section{Conclusion}
+
+Quadratic Proposer Selection applies a square-root transformation to the weights of CometBFT's proposer rotation, leaving quorum formation, commit voting, and reward distribution linear in stake. Under QPS, block production ratios compress from $k$ to $\sqrt{k}$; BFT safety is preserved because the quorum computation is not modified; and the splitting incentive created by concavity is confined to the proposer premium $B$, so the mechanism is Sybil-resistant where $B$ is small and is not where proposers capture substantial extractable income. Over a 95-day, 1.39-million-block deployment with validator sets between 6 and 41 members, observed block distributions matched the prediction in every membership-stable window in which proposers remained available, and deviated in an attributable way in the one window where they did not. The mechanism generalizes to $s^\theta$ with a one-parameter tradeoff between compression and splitting incentive; $\theta = 1/2$ is the deployed point, not the only defensible one. This work does not provide evidence at large set sizes, does not subject the economic analysis to adversarial pressure, and does not establish that production-side compression alone changes long-run stake concentration. These remain open questions for longer-lived or adversarial deployments.
+
+\bibliographystyle{plainnat}
+\begin{thebibliography}{10}
+
+\bibitem{bravo}
+M.~Bravo, G.~Chockler, and A.~Gotsman.
+\newblock Making Byzantine Consensus Live.
+\newblock \textit{Distributed Computing}, 35(6):503--532, 2022.
+\newblock \href{https://doi.org/10.1007/s00446-022-00432-y}{doi:10.1007/s00446-022-00432-y}.
+
+\bibitem{buchman}
+E.~Buchman.
+\newblock Tendermint: Byzantine Fault Tolerance in the Age of Blockchains.
+\newblock Master's thesis, University of Guelph, 2016.
+\newblock \url{https://atrium.lib.uoguelph.ca/xmlui/handle/10214/9769}.
+
+\bibitem{bhw}
+V.~Buterin, Z.~Hitzig, and E.~G.~Weyl.
+\newblock A Flexible Design for Funding Public Goods.
+\newblock \textit{Management Science}, 65(11), 2019.
+\newblock \href{https://doi.org/10.1287/mnsc.2019.3337}{doi:10.1287/mnsc.2019.3337}.
+
+\bibitem{cometbft}
+CometBFT.
+\newblock Proposer Selection Procedure.
+\newblock \url{https://raw.githubusercontent.com/cosmos/docs/b44afc969147d624a65c2a578da0e2ada51df8c3/cometbft/next/spec/consensus/Proposer-Selection.mdx}.
+
+\bibitem{daian}
+P.~Daian, S.~Goldfeder, T.~Kell, Y.~Li, X.~Zhao, I.~Bentov, L.~Breidenbach, and A.~Juels.
+\newblock Flash Boys 2.0: Frontrunning in Decentralized Exchanges, Miner Extractable Value, and Consensus Instability.
+\newblock In \textit{IEEE Symposium on Security and Privacy}, pp.~910--927, 2020.
+\newblock \href{https://doi.org/10.1109/SP40000.2020.00040}{doi:10.1109/SP40000.2020.00040}.
+
+\bibitem{douceur}
+J.~R.~Douceur.
+\newblock The Sybil Attack.
+\newblock In \textit{International Workshop on Peer-to-Peer Systems (IPTPS)}, LNCS 2429, pp.~251--260, Springer, 2002.
+\newblock \href{https://doi.org/10.1007/3-540-45748-8_24}{doi:10.1007/3-540-45748-8\_24}.
+
+\bibitem{kwon}
+J.~Kwon.
+\newblock Tendermint: Consensus without Mining.
+\newblock Technical Report, 2014.
+\newblock \url{https://tendermint.com/static/docs/tendermint.pdf}.
+
+\bibitem{srsw}
+S.~Motepalli and H.-A.~Jacobsen.
+\newblock Decentralization in PoS Blockchain Consensus: Quantification and Advancement.
+\newblock \textit{IEEE Transactions on Network and Service Management}, 2025.
+\newblock \href{https://doi.org/10.1109/TNSM.2025.3561098}{doi:10.1109/TNSM.2025.3561098}.
+
+\bibitem{qv}
+S.~Lalley and E.~G.~Weyl.
+\newblock Quadratic Voting: How Mechanism Design Can Radicalize Democracy.
+\newblock \textit{AEA Papers and Proceedings}, 108:33--37, 2018.
+\newblock \href{https://doi.org/10.1257/pandp.20181002}{doi:10.1257/pandp.20181002}.
+
+\bibitem{srinivasan}
+B.~S.~Srinivasan and L.~Lee.
+\newblock Quantifying Decentralization.
+\newblock 2017.
+\newblock \url{https://news.earn.com/quantifying-decentralization-e39db233c28e}.
+
+\end{thebibliography}
+
+\end{document}

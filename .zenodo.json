@@ -1,0 +1,17 @@
+{
+  "title": "Quadratic Proposer Selection: Sublinear Block Production in BFT Consensus",
+  "description": "Technical report and reference implementation for QPS, a proposer selection mechanism applying sqrt(stake) to CometBFT priority increments.",
+  "upload_type": "publication",
+  "publication_type": "report",
+  "creators": [
+    {"name": "Downey, Simon"}
+  ],
+  "license": "mit",
+  "keywords": [
+    "BFT",
+    "consensus",
+    "proposer selection",
+    "CometBFT",
+    "stake concentration"
+  ]
+}
